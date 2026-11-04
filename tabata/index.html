@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Tabata">
+<meta name="theme-color" content="#111111">
+<link rel="apple-touch-icon" href="icon.png">
+<title>Tabata Timer</title>
+<style>
+  :root {
+    --bg: #111;
+    --fg: #fff;
+    --ready: #6b6b6b;
+    --work: #e5482f;
+    --rest: #2f7de5;
+    --done: #2fa65a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
+    display: flex;
+    flex-direction: column;
+    padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+    transition: background-color .25s;
+    user-select: none;
+    -webkit-user-select: none;
+    overflow: hidden;
+  }
+  body.ready { background: var(--ready); }
+  body.work  { background: var(--work); }
+  body.rest  { background: var(--rest); }
+  body.done  { background: var(--done); }
+
+  .round {
+    margin-top: 24px;
+    text-align: center;
+    font-size: 28px;
+    font-weight: 600;
+    opacity: .9;
+  }
+  .dots { display: flex; justify-content: center; gap: 8px; margin-top: 12px; }
+  .dot {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,.8);
+  }
+  .dot.filled { background: #fff; }
+  .dot.current { background: rgba(255,255,255,.45); }
+
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .state {
+    font-size: 56px;
+    font-weight: 800;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+  .secs {
+    font-size: 46vw;
+    max-height: 60vh;
+    line-height: 1;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .total { font-size: 18px; opacity: .8; margin-top: 8px; font-variant-numeric: tabular-nums; }
+
+  .controls { display: flex; gap: 12px; margin-bottom: 24px; }
+  button {
+    flex: 1;
+    font: inherit;
+    font-size: 24px;
+    font-weight: 700;
+    padding: 20px 0;
+    border-radius: 18px;
+    border: 0;
+    color: #111;
+    background: #fff;
+  }
+  button.secondary { background: rgba(255,255,255,.25); color: #fff; flex: 0 0 34%; }
+  button:active { transform: scale(.97); }
+  .hint { text-align: center; font-size: 13px; opacity: .7; margin-bottom: 12px; min-height: 1em; }
+</style>
+</head>
+<body class="idle">
+  <div class="round" id="round">8 rounds · 20s / 10s</div>
+  <div class="dots" id="dots"></div>
+
+  <div class="main">
+    <div class="state" id="state">Tabata</div>
+    <div class="secs" id="secs">20</div>
+    <div class="total" id="total">Total 4:00</div>
+  </div>
+
+  <div class="hint" id="hint">Turn the ringer on and volume up.</div>
+  <div class="controls">
+    <button class="secondary" id="reset">Reset</button>
+    <button id="start">Start</button>
+  </div>
+
+<script>
+(() => {
+  // ---- Program ---------------------------------------------------------
+  const ROUNDS = 8, WORK = 20, REST = 10, PREP = 10;
+
+  // Phases: prep, then work/rest × 8 (no rest after the final work).
+  const phases = [{ kind: 'ready', dur: PREP, round: 1 }];
+  for (let r = 1; r <= ROUNDS; r++) {
+    phases.push({ kind: 'work', dur: WORK, round: r });
+    if (r < ROUNDS) phases.push({ kind: 'rest', dur: REST, round: r });
+  }
+  const workoutTotal = ROUNDS * WORK + (ROUNDS - 1) * REST;
+
+  // ---- Elements --------------------------------------------------------
+  const $ = id => document.getElementById(id);
+  const elRound = $('round'), elState = $('state'), elSecs = $('secs'),
+        elTotal = $('total'), elDots = $('dots'), elHint = $('hint'),
+        btnStart = $('start'), btnReset = $('reset');
+  for (let i = 0; i < ROUNDS; i++) elDots.appendChild(document.createElement('div')).className = 'dot';
+
+  // ---- Audio -----------------------------------------------------------
+  let ctx = null;
+  function initAudio() {
+    // iOS 17+: play even when the silent switch is on.
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === 'suspended') ctx.resume();
+    // Unlock speech synthesis on iOS (must happen inside a tap).
+    if ('speechSynthesis' in window) {
+      const u = new SpeechSynthesisUtterance(' ');
+      u.volume = 0;
+      speechSynthesis.speak(u);
+    }
+  }
+
+  function tone(freq, dur, when = 0, vol = 0.6) {
+    if (!ctx) return;
+    const t = ctx.currentTime + when;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'square';
+    o.frequency.value = freq;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+    g.gain.setValueAtTime(vol, t + dur - 0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(ctx.destination);
+    o.start(t); o.stop(t + dur + 0.02);
+  }
+
+  function say(text) {
+    if (!('speechSynthesis' in window)) return;
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.05; u.volume = 1; u.lang = 'en-US';
+    speechSynthesis.speak(u);
+  }
+
+  const beep = () => tone(880, 0.15);                     // countdown beep
+  const cueGo = () => { tone(1320, 0.45); say('Go!'); };
+  const cueRest = () => { tone(520, 0.45); say('Rest'); };
+  const cueDone = () => {
+    [0, 0.25, 0.5].forEach(d => tone(1320, 0.18, d));
+    tone(1760, 1.0, 0.8);
+    setTimeout(() => say('Done! Great work.'), 1900);
+  };
+
+  // ---- Keep screen awake ----------------------------------------------
+  let wakeLock = null;
+  async function lockScreen() {
+    try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); }
+    catch (e) { elHint.textContent = 'Tip: keep the screen on (Auto-Lock) during the workout.'; }
+  }
+  function unlockScreen() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && running) lockScreen();
+  });
+
+  // ---- Timer state -----------------------------------------------------
+  // Time is derived from the clock (not counted ticks) so it never drifts.
+  let running = false, finished = false;
+  let startedAt = 0;      // performance.now() when (re)started
+  let elapsedBefore = 0;  // ms accumulated before the current run segment
+  let lastPhase = -1, lastSec = -1, timerId = null;
+
+  const elapsed = () => elapsedBefore + (running ? performance.now() - startedAt : 0);
+
+  function locate(ms) {
+    let t = ms / 1000;
+    for (let i = 0; i < phases.length; i++) {
+      if (t < phases[i].dur) return { i, left: phases[i].dur - t };
+      t -= phases[i].dur;
+    }
+    return { i: phases.length, left: 0 };
+  }
+
+  const fmt = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+
+  function render(i, secsLeft) {
+    if (i >= phases.length) {
+      document.body.className = 'done';
+      elState.textContent = 'Done!';
+      elSecs.textContent = '✓';
+      elRound.textContent = `${ROUNDS} / ${ROUNDS} rounds complete`;
+      elTotal.textContent = `Total ${fmt(workoutTotal)}`;
+      [...elDots.children].forEach(d => d.className = 'dot filled');
+      return;
+    }
+    const p = phases[i];
+    document.body.className = p.kind;
+    elState.textContent = p.kind === 'ready' ? 'Get ready' : p.kind === 'work' ? 'Work' : 'Rest';
+    elSecs.textContent = secsLeft;
+    elRound.textContent = `Round ${p.round} / ${ROUNDS}`;
+    const remain = Math.max(0, Math.ceil(workoutTotal - Math.max(0, elapsed() / 1000 - PREP)));
+    elTotal.textContent = `Remaining ${fmt(remain)}`;
+    [...elDots.children].forEach((d, k) => {
+      const r = k + 1;
+      d.className = 'dot' + (r < p.round || (r === p.round && p.kind === 'rest') ? ' filled'
+                           : r === p.round && p.kind === 'work' ? ' current' : '');
+    });
+  }
+
+  function tick() {
+    const { i, left } = locate(elapsed());
+    const secsLeft = Math.ceil(left - 1e-6);
+
+    if (i !== lastPhase) {
+      if (i >= phases.length) { finish(); return; }
+      if (lastPhase !== -1 || i > 0) {
+        if (phases[i].kind === 'work') cueGo();
+        else if (phases[i].kind === 'rest') cueRest();
+      }
+      lastPhase = i; lastSec = secsLeft;
+    } else if (secsLeft !== lastSec) {
+      // Countdown beeps at 3, 2, 1 before every change.
+      if (secsLeft <= 3 && secsLeft >= 1) beep();
+      lastSec = secsLeft;
+    }
+    render(i, secsLeft);
+  }
+
+  function start() {
+    initAudio();
+    if (finished) reset();
+    if (lastPhase === -1) say('Get ready');
+    running = true;
+    startedAt = performance.now();
+    timerId = setInterval(tick, 50);
+    lockScreen();
+    btnStart.textContent = 'Pause';
+    tick();
+  }
+
+  function pause() {
+    elapsedBefore = elapsed();
+    running = false;
+    clearInterval(timerId);
+    unlockScreen();
+    btnStart.textContent = 'Resume';
+    elState.textContent = 'Paused';
+  }
+
+  function finish() {
+    running = false; finished = true;
+    clearInterval(timerId);
+    unlockScreen();
+    cueDone();
+    render(phases.length, 0);
+    btnStart.textContent = 'Again';
+  }
+
+  function reset() {
+    running = false; finished = false;
+    clearInterval(timerId);
+    unlockScreen();
+    elapsedBefore = 0; lastPhase = -1; lastSec = -1;
+    if ('speechSynthesis' in window) speechSynthesis.cancel();
+    document.body.className = 'idle';
+    elState.textContent = 'Tabata';
+    elSecs.textContent = WORK;
+    elRound.textContent = `${ROUNDS} rounds · ${WORK}s / ${REST}s`;
+    elTotal.textContent = `Total ${fmt(workoutTotal)}`;
+    [...elDots.children].forEach(d => d.className = 'dot');
+    btnStart.textContent = 'Start';
+  }
+
+  btnStart.addEventListener('click', () => (running ? pause() : start()));
+  btnReset.addEventListener('click', reset);
+})();
+</script>
+</body>
+</html>
