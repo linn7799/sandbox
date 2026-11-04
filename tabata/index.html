@@ -129,32 +129,68 @@
   for (let i = 0; i < ROUNDS; i++) elDots.appendChild(document.createElement('div')).className = 'dot';
 
   // ---- Audio -----------------------------------------------------------
-  let ctx = null;
+  // Beeps are pre-rendered WAV clips played through <audio> elements.
+  // (Web Audio is unreliable on iOS: muted by the silent switch and
+  // interrupted by speech synthesis. <audio> plays as media.)
+  function makeWav(notes, total) {
+    const rate = 22050, n = Math.ceil(total * rate);
+    const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const str = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+    str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVEfmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    str(36, 'data'); v.setUint32(40, n * 2, true);
+    const samples = new Float32Array(n);
+    for (const [freq, start, dur] of notes) {
+      const s0 = Math.floor(start * rate), len = Math.floor(dur * rate);
+      for (let k = 0; k < len && s0 + k < n; k++) {
+        const t = k / rate;
+        const env = Math.min(1, k / 200, (len - k) / 400);       // click-free edges
+        const w = Math.sin(2 * Math.PI * freq * t) + 0.3 * Math.sin(6 * Math.PI * freq * t);
+        samples[s0 + k] += 0.7 * env * w;
+      }
+    }
+    for (let k = 0; k < n; k++) v.setInt16(44 + k * 2, Math.max(-1, Math.min(1, samples[k])) * 32767, true);
+    const a = new Audio(URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })));
+    a.preload = 'auto';
+    return a;
+  }
+
+  const sounds = {
+    beep: makeWav([[880, 0, 0.15]], 0.2),
+    go:   makeWav([[1320, 0, 0.3]], 0.35),
+    rest: makeWav([[520, 0, 0.3]], 0.35),
+    done: makeWav([[1320, 0, 0.18], [1320, 0.25, 0.18], [1320, 0.5, 0.18], [1760, 0.8, 1.0]], 1.9),
+  };
+
+  function play(name) {
+    const a = sounds[name];
+    try { a.currentTime = 0; } catch (e) {}
+    const p = a.play();
+    if (p && p.catch) p.catch(() => {});
+  }
+
+  let unlocked = false;
   function initAudio() {
     // iOS 17+: play even when the silent switch is on.
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
-    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
-    if (ctx.state === 'suspended') ctx.resume();
+    // iOS only lets an <audio> element play later if it was started inside a tap.
+    if (!unlocked) {
+      unlocked = true;
+      Object.values(sounds).forEach(a => {
+        a.muted = true;
+        const p = a.play();
+        const done = () => { a.pause(); a.currentTime = 0; a.muted = false; };
+        p && p.then ? p.then(done, done) : done();
+      });
+    }
     // Unlock speech synthesis on iOS (must happen inside a tap).
     if ('speechSynthesis' in window) {
       const u = new SpeechSynthesisUtterance(' ');
       u.volume = 0;
       speechSynthesis.speak(u);
     }
-  }
-
-  function tone(freq, dur, when = 0, vol = 0.6) {
-    if (!ctx) return;
-    const t = ctx.currentTime + when;
-    const o = ctx.createOscillator(), g = ctx.createGain();
-    o.type = 'square';
-    o.frequency.value = freq;
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
-    g.gain.setValueAtTime(vol, t + dur - 0.03);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g).connect(ctx.destination);
-    o.start(t); o.stop(t + dur + 0.02);
   }
 
   function say(text) {
@@ -165,14 +201,11 @@
     speechSynthesis.speak(u);
   }
 
-  const beep = () => tone(880, 0.15);                     // countdown beep
-  const cueGo = () => { tone(1320, 0.45); say('Go!'); };
-  const cueRest = () => { tone(520, 0.45); say('Rest'); };
-  const cueDone = () => {
-    [0, 0.25, 0.5].forEach(d => tone(1320, 0.18, d));
-    tone(1760, 1.0, 0.8);
-    setTimeout(() => say('Done! Great work.'), 1900);
-  };
+  // Speech starts just after the tone so the two don't fight over audio.
+  const beep = () => play('beep');                         // countdown beep
+  const cueGo = () => { play('go'); setTimeout(() => say('Go!'), 300); };
+  const cueRest = () => { play('rest'); setTimeout(() => say('Rest'), 300); };
+  const cueDone = () => { play('done'); setTimeout(() => say('Done! Great work.'), 1900); };
 
   // ---- Keep screen awake ----------------------------------------------
   let wakeLock = null;
